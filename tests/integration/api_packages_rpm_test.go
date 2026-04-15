@@ -744,6 +744,90 @@ gpgkey=%sapi/packages/%s/rpm/repository.key`,
 				})
 			})
 
+			t.Run("NoArch", func(t *testing.T) {
+				defer tests.PrintCurrentTest(t)()
+
+				noarchPackageName := "gitea-noarch-test"
+				noarchPackageVersion := "1.0.0-1"
+
+				base64NoarchRpmPackageContent := `H4sICKC05mkAA2dpdGVhLW5vYXJjaC10ZXN0LTEuMC4wLTEubm9hcmNoLnJwbQDtmLtrFEEcx+dyp0ZROYliFMUTLJJiz53HPgbBBwZR0Jgiglo5sztzLt6Lu0uIYmEhFhFUsBUJahd8gHZWKvgnpLESVIwYo43a6Dm7+zvfhbXsF+ZmP/N7zM5y03wXZt89yyOjbiXqKGHVG6IVnLQ6qt2xcNku2xZG/6wcWvL70qXbr3PwuAyh4gMz74TnW2YumqJVZl76vQPKrQEeTjn/2swFM6rAb9N61Ezr84sQPwfx9xA/b8Il6nEpWSgwVz7lrqOZ9oWjqKZSShIQT/k4cHWIAtcJHNsR1OGKSp8w5QcMM+4SiSV1OSY293wiTAMmmBauL1XoeJ7mXAqhafL6BXzzSd+N2eFP9x8/nHt25u7CBbN49t8/YKZMmTJlypQpU6ZMmTJlypTpP1biiXS73Sso8TR+8U1KCOU+mHkXSnyN3HPICc3oh5yeTxL7Jn3A88Brgd8Ab0Q/fJTlZmwCXgC2gd+h1FfZDbwI9SPAHyB+EPgjxMeAP0O/ceAvED8B/BVYp1xYC1wDXg/nuww8CPvFvlHePG6A+D3gjcBd4KG0X24d1B9N63Nw3sKxND9XApaQPwQcAm8HVsAMWANz4CrwjpQHrsJ+8D0GnkIcvsfAC9j/OPBLyL8GPA/xmZj3oj/8OZT4cwij0WStFK+VmiI4JSoKjf8EZdMgevVgRjbqqg1/mEMHxtGRerupgkhHKkTVqD4xhdLuf27VswLL7VZQbjVrf3mZ9KVX9IZJqkZyaG+j1mypdluF+6KqGhU11R5GEItXRqKKKf6xNiZOVxsiSW7vF5NqrKV0NDWMqNmfWRixsptYkgx+iV1O/Mn+nldpHSYlq4KCZtRAlTNRE3E4lDWp6mGjZaUHTWomOtrykdCUKxxgLjTzfKG0J2wqFfeVFjyMzT1CfC255lRRn5HQDT2JmcDMdQRzeNqL0NBmhEimlTDpnoeV7xGPYSmpZ3vcljQIbYf6SmjJXEwoVT6xpc+k4wkS/7fSC97txvcCFbdcTO92X57apoHNSquLs6s3b3s0uHXPpes77+yZnp5eaa7m3PxbJ3YYvwFme3wbyRUAAA==`
+				noarchRpmPackageContent, err := base64.StdEncoding.DecodeString(base64NoarchRpmPackageContent)
+				require.NoError(t, err)
+
+				zrNoarch, err := gzip.NewReader(bytes.NewReader(noarchRpmPackageContent))
+				require.NoError(t, err)
+				noarchContent, err := io.ReadAll(zrNoarch)
+				require.NoError(t, err)
+
+				// Upload the noarch RPM
+				req := NewRequestWithBody(t, "PUT", groupURL+"/upload", bytes.NewReader(noarchContent)).
+					AddBasicAuth(user.Name)
+				MakeRequest(t, req, http.StatusCreated)
+
+				// The noarch package should appear in primary.xml when any arch is requested.
+				// At this point the group contains the existing x86_64 package + this noarch one.
+				req = NewRequest(t, "GET", groupURL+"/repodata/primary.xml.gz")
+				resp := MakeRequest(t, req, http.StatusOK)
+
+				type PackageSummary struct {
+					Name         string `xml:"name"`
+					Architecture string `xml:"arch"`
+				}
+				type PrimaryMetadata struct {
+					XMLName      xml.Name         `xml:"metadata"`
+					PackageCount int              `xml:"packages,attr"`
+					Packages     []PackageSummary `xml:"package"`
+				}
+
+				var primary PrimaryMetadata
+				decodeGzipXML(t, resp, &primary)
+
+				// Both the arch-specific package uploaded earlier and the noarch one must be present.
+				assert.Equal(t, 2, primary.PackageCount)
+				assert.Len(t, primary.Packages, 2)
+
+				archNames := make([]string, 0, len(primary.Packages))
+				for _, p := range primary.Packages {
+					archNames = append(archNames, p.Architecture)
+				}
+				assert.Contains(t, archNames, packageArchitecture) // x86_64 from the Upload subtest
+				assert.Contains(t, archNames, "noarch")
+
+				// noarch package must be downloadable regardless of the arch path used.
+				for _, arch := range []string{"noarch", "x86_64", "aarch64", "my_arch"} {
+					req = NewRequest(t, "GET", fmt.Sprintf(
+						"%s/package/%s/%s/%s",
+						groupURL, noarchPackageName, noarchPackageVersion, arch,
+					))
+					MakeRequest(t, req, http.StatusOK)
+				}
+
+				// Clean up: delete via the canonical noarch path.
+				req = NewRequest(t, "DELETE", fmt.Sprintf(
+					"%s/package/%s/%s/noarch",
+					groupURL, noarchPackageName, noarchPackageVersion,
+				)).AddBasicAuth(user.Name)
+				MakeRequest(t, req, http.StatusNoContent)
+
+				// After deletion, the noarch package must no longer be reachable via any arch.
+				for _, arch := range []string{"noarch", "x86_64", "aarch64"} {
+					req = NewRequest(t, "GET", fmt.Sprintf(
+						"%s/package/%s/%s/%s",
+						groupURL, noarchPackageName, noarchPackageVersion, arch,
+					))
+					MakeRequest(t, req, http.StatusNotFound)
+				}
+
+				// The x86_64 package from the Upload subtest must still be present.
+				req = NewRequest(t, "GET", groupURL+"/repodata/primary.xml.gz")
+				resp = MakeRequest(t, req, http.StatusOK)
+
+				var primaryAfter PrimaryMetadata
+				decodeGzipXML(t, resp, &primaryAfter)
+				assert.Equal(t, 1, primaryAfter.PackageCount)
+				assert.Equal(t, packageArchitecture, primaryAfter.Packages[0].Architecture)
+			})
+
 			t.Run("Delete", func(t *testing.T) {
 				defer tests.PrintCurrentTest(t)()
 

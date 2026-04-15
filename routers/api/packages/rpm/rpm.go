@@ -220,6 +220,8 @@ func UploadPackageFile(ctx *context.Context) {
 func DownloadPackageFile(ctx *context.Context) {
 	name := ctx.PathParam("name")
 	version := ctx.PathParam("version")
+	architecture := ctx.PathParam("architecture")
+	group := ctx.PathParam("group")
 
 	s, u, pf, err := packages_service.OpenFileForDownloadByPackageNameAndVersion(
 		ctx,
@@ -230,18 +232,44 @@ func DownloadPackageFile(ctx *context.Context) {
 			Version:     version,
 		},
 		&packages_service.PackageFileInfo{
-			Filename:     fmt.Sprintf("%s-%s.%s.rpm", name, version, ctx.PathParam("architecture")),
-			CompositeKey: ctx.PathParam("group"),
+			Filename:     fmt.Sprintf("%s-%s.%s.rpm", name, version, architecture),
+			CompositeKey: group,
 		},
 		ctx.Req.Method,
 	)
 	if err != nil {
-		if errors.Is(err, util.ErrNotExist) {
-			apiError(ctx, http.StatusNotFound, err)
-		} else {
-			apiError(ctx, http.StatusInternalServerError, err)
+		if !errors.Is(err, util.ErrNotExist) || architecture == "noarch" {
+			if errors.Is(err, util.ErrNotExist) {
+				apiError(ctx, http.StatusNotFound, err)
+			} else {
+				apiError(ctx, http.StatusInternalServerError, err)
+			}
+			return
 		}
-		return
+
+		// Fall back to noarch
+		s, u, pf, err = packages_service.OpenFileForDownloadByPackageNameAndVersion(
+			ctx,
+			&packages_service.PackageInfo{
+				Owner:       ctx.Package.Owner,
+				PackageType: packages_model.TypeRpm,
+				Name:        name,
+				Version:     version,
+			},
+			&packages_service.PackageFileInfo{
+				Filename:     fmt.Sprintf("%s-%s.noarch.rpm", name, version),
+				CompositeKey: group,
+			},
+			ctx.Req.Method,
+		)
+		if err != nil {
+			if errors.Is(err, util.ErrNotExist) {
+				apiError(ctx, http.StatusNotFound, err)
+			} else {
+				apiError(ctx, http.StatusInternalServerError, err)
+			}
+			return
+		}
 	}
 
 	helper.ServePackageFile(ctx, s, u, pf)
