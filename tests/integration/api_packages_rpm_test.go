@@ -32,14 +32,24 @@ import (
 
 func TestPackageRpm(t *testing.T) {
 	defer tests.PrepareTestEnv(t)()
+	user := unittest.AssertExistsAndLoadBean(t, &user_model.User{ID: 2})
 
 	packageName := "gitea-test"
 	packageVersion := "1.0.2-1"
 	packageArchitecture := "x86_64"
 
-	user := unittest.AssertExistsAndLoadBean(t, &user_model.User{ID: 2})
-
-	base64RpmPackageContent := `H4sICFayB2QCAGdpdGVhLXRlc3QtMS4wLjItMS14ODZfNjQucnBtAO2YV4gTQRjHJzl7wbNhhxVF
+	// To build an RPM package, it needs tools lik "cpio", it's not easy to do in Golang.
+	// So here we only use pre-built package contents. And to save space, the content is gzipped and base64 encoded.
+	rpmContentFromGzipBase64 := func(t testing.TB, s string) []byte {
+		b, err := base64.StdEncoding.DecodeString(s)
+		require.NoError(t, err)
+		zr, err := gzip.NewReader(bytes.NewReader(b))
+		require.NoError(t, err)
+		content, err := io.ReadAll(zr)
+		require.NoError(t, err)
+		return content
+	}
+	packageRpmGzipBase64 := `H4sICFayB2QCAGdpdGVhLXRlc3QtMS4wLjItMS14ODZfNjQucnBtAO2YV4gTQRjHJzl7wbNhhxVF
 VNwk2zd2PdvZ9Sxnd3Z3NllNsmF3o6congVFsWFHRWwIImIXfRER0QcRfPBJEXvvBQvWSfZTT0VQ
 8TF/MuU33zcz3+zOJGEe73lyuQBRBWKWRzDrEddjuVAkxLMc+lsFUOWfm5bvvReAalWECg/TsivU
 dyKa0U61aVnl6wj0Uxe4nc8F92hZiaYE8CO/P0r7/Quegr0c7M/AvoCaGZEIWNGUqMHrhhGROIUT
@@ -67,14 +77,8 @@ Mu0UFYgZ/bYnuvn/vz4wtCz8qMwsHUvP0PX3tbYFUctAPdrY6tiiDtcCddDECahx7SuVNP5dpmb5
 9tMDyaXb7OAlk5acuPn57ss9mw6Wym0m1Fq2cej7tUt2LL4/b8enXU2fndk+fvv57ndnt55/cQob
 7tpp/pEjDS7cGPZ6BY430+7danDq6f42Nw49b9F7zp6BiKpJb9s5P0AYN2+L159cnrur636rx+v1
 7ae1K28QbMMcqI8CqwIrgwg9nTOp8Oj9q81plUY7ZuwXN8Vvs8wbAAA=`
-	rpmPackageContent, err := base64.StdEncoding.DecodeString(base64RpmPackageContent)
-	assert.NoError(t, err)
 
-	zr, err := gzip.NewReader(bytes.NewReader(rpmPackageContent))
-	assert.NoError(t, err)
-
-	content, err := io.ReadAll(zr)
-	assert.NoError(t, err)
+	packageRpmContent := rpmContentFromGzipBase64(t, packageRpmGzipBase64)
 
 	decodeGzipXML := func(t testing.TB, resp *httptest.ResponseRecorder, v any) {
 		t.Helper()
@@ -130,10 +134,10 @@ gpgkey=%sapi/packages/%s/rpm/repository.key`,
 			t.Run("Upload", func(t *testing.T) {
 				url := groupURL + "/upload"
 
-				req := NewRequestWithBody(t, "PUT", url, bytes.NewReader(content))
+				req := NewRequestWithBody(t, "PUT", url, bytes.NewReader(packageRpmContent))
 				MakeRequest(t, req, http.StatusUnauthorized)
 
-				req = NewRequestWithBody(t, "PUT", url, bytes.NewReader(content)).
+				req = NewRequestWithBody(t, "PUT", url, bytes.NewReader(packageRpmContent)).
 					AddBasicAuth(user.Name)
 				MakeRequest(t, req, http.StatusCreated)
 
@@ -156,9 +160,9 @@ gpgkey=%sapi/packages/%s/rpm/repository.key`,
 
 				pb, err := packages.GetBlobByID(t.Context(), pfs[0].BlobID)
 				assert.NoError(t, err)
-				assert.Equal(t, int64(len(content)), pb.Size)
+				assert.Equal(t, int64(len(packageRpmContent)), pb.Size)
 
-				req = NewRequestWithBody(t, "PUT", url, bytes.NewReader(content)).
+				req = NewRequestWithBody(t, "PUT", url, bytes.NewReader(packageRpmContent)).
 					AddBasicAuth(user.Name)
 				MakeRequest(t, req, http.StatusConflict)
 			})
@@ -169,12 +173,12 @@ gpgkey=%sapi/packages/%s/rpm/repository.key`,
 				// download the package without the file name
 				req := NewRequest(t, "GET", fmt.Sprintf("%s/package/%s/%s/%s", groupURL, packageName, packageVersion, packageArchitecture))
 				resp := MakeRequest(t, req, http.StatusOK)
-				assert.Equal(t, content, resp.Body.Bytes())
+				assert.Equal(t, packageRpmContent, resp.Body.Bytes())
 
 				// download the package with a file name (it can be anything)
 				req = NewRequest(t, "GET", fmt.Sprintf("%s/package/%s/%s/%s/any-file-name", groupURL, packageName, packageVersion, packageArchitecture))
 				resp = MakeRequest(t, req, http.StatusOK)
-				assert.Equal(t, content, resp.Body.Bytes())
+				assert.Equal(t, packageRpmContent, resp.Body.Bytes())
 			})
 
 			t.Run("Repository", func(t *testing.T) {
@@ -332,7 +336,7 @@ gpgkey=%sapi/packages/%s/rpm/repository.key`,
 					assert.Equal(t, "sha256", p.Checksum.Type)
 					assert.Equal(t, "f1d5d2ffcbe4a7568e98b864f40d923ecca084e9b9bcd5977ed6521c46d3fa4c", p.Checksum.Checksum)
 					assert.Equal(t, "https://gitea.io", p.URL)
-					assert.EqualValues(t, len(content), p.Size.Package)
+					assert.EqualValues(t, len(packageRpmContent), p.Size.Package)
 					assert.EqualValues(t, 13, p.Size.Installed)
 					assert.EqualValues(t, 272, p.Size.Archive)
 					assert.Equal(t, fmt.Sprintf("package/%s/%s/%s/%s", packageName, packageVersion, packageArchitecture, fmt.Sprintf("%s-%s.%s.rpm", packageName, packageVersion, packageArchitecture)), p.Location.Href)
@@ -749,19 +753,24 @@ gpgkey=%sapi/packages/%s/rpm/repository.key`,
 
 				noarchPackageName := "gitea-noarch-test"
 				noarchPackageVersion := "1.0.0-1"
-
-				base64NoarchRpmPackageContent := `H4sICKC05mkAA2dpdGVhLW5vYXJjaC10ZXN0LTEuMC4wLTEubm9hcmNoLnJwbQDtmLtrFEEcx+dyp0ZROYliFMUTLJJiz53HPgbBBwZR0Jgiglo5sztzLt6Lu0uIYmEhFhFUsBUJahd8gHZWKvgnpLESVIwYo43a6Dm7+zvfhbXsF+ZmP/N7zM5y03wXZt89yyOjbiXqKGHVG6IVnLQ6qt2xcNku2xZG/6wcWvL70qXbr3PwuAyh4gMz74TnW2YumqJVZl76vQPKrQEeTjn/2swFM6rAb9N61Ezr84sQPwfx9xA/b8Il6nEpWSgwVz7lrqOZ9oWjqKZSShIQT/k4cHWIAtcJHNsR1OGKSp8w5QcMM+4SiSV1OSY293wiTAMmmBauL1XoeJ7mXAqhafL6BXzzSd+N2eFP9x8/nHt25u7CBbN49t8/YKZMmTJlypQpU6ZMmTJlypTpP1biiXS73Sso8TR+8U1KCOU+mHkXSnyN3HPICc3oh5yeTxL7Jn3A88Brgd8Ab0Q/fJTlZmwCXgC2gd+h1FfZDbwI9SPAHyB+EPgjxMeAP0O/ceAvED8B/BVYp1xYC1wDXg/nuww8CPvFvlHePG6A+D3gjcBd4KG0X24d1B9N63Nw3sKxND9XApaQPwQcAm8HVsAMWANz4CrwjpQHrsJ+8D0GnkIcvsfAC9j/OPBLyL8GPA/xmZj3oj/8OZT4cwij0WStFK+VmiI4JSoKjf8EZdMgevVgRjbqqg1/mEMHxtGRerupgkhHKkTVqD4xhdLuf27VswLL7VZQbjVrf3mZ9KVX9IZJqkZyaG+j1mypdluF+6KqGhU11R5GEItXRqKKKf6xNiZOVxsiSW7vF5NqrKV0NDWMqNmfWRixsptYkgx+iV1O/Mn+nldpHSYlq4KCZtRAlTNRE3E4lDWp6mGjZaUHTWomOtrykdCUKxxgLjTzfKG0J2wqFfeVFjyMzT1CfC255lRRn5HQDT2JmcDMdQRzeNqL0NBmhEimlTDpnoeV7xGPYSmpZ3vcljQIbYf6SmjJXEwoVT6xpc+k4wkS/7fSC97txvcCFbdcTO92X57apoHNSquLs6s3b3s0uHXPpes77+yZnp5eaa7m3PxbJ3YYvwFme3wbyRUAAA==`
-				noarchRpmPackageContent, err := base64.StdEncoding.DecodeString(base64NoarchRpmPackageContent)
-				require.NoError(t, err)
-
-				zrNoarch, err := gzip.NewReader(bytes.NewReader(noarchRpmPackageContent))
-				require.NoError(t, err)
-				noarchContent, err := io.ReadAll(zrNoarch)
-				require.NoError(t, err)
-
+				noarchPackageGzipBase64 := `H4sICKC05mkAA2dpdGVhLW5vYXJjaC10ZXN0LTEuMC4wLTEubm9hcmNoLnJwbQDtmLtrFEEcx+dy` +
+					`p0ZROYliFMUTLJJiz53HPgbBBwZR0Jgiglo5sztzLt6Lu0uIYmEhFhFUsBUJahd8gHZWKvgnpLES` +
+					`VIwYo43a6Dm7+zvfhbXsF+ZmP/N7zM5y03wXZt89yyOjbiXqKGHVG6IVnLQ6qt2xcNku2xZG/6wc` +
+					`WvL70qXbr3PwuAyh4gMz74TnW2YumqJVZl76vQPKrQEeTjn/2swFM6rAb9N61Ezr84sQPwfx9xA/` +
+					`b8Il6nEpWSgwVz7lrqOZ9oWjqKZSShIQT/k4cHWIAtcJHNsR1OGKSp8w5QcMM+4SiSV1OSY293wi` +
+					`TAMmmBauL1XoeJ7mXAqhafL6BXzzSd+N2eFP9x8/nHt25u7CBbN49t8/YKZMmTJlypQpU6ZMmTJl` +
+					`ypTpP1biiXS73Sso8TR+8U1KCOU+mHkXSnyN3HPICc3oh5yeTxL7Jn3A88Brgd8Ab0Q/fJTlZmwC` +
+					`XgC2gd+h1FfZDbwI9SPAHyB+EPgjxMeAP0O/ceAvED8B/BVYp1xYC1wDXg/nuww8CPvFvlHePG6A` +
+					`+D3gjcBd4KG0X24d1B9N63Nw3sKxND9XApaQPwQcAm8HVsAMWANz4CrwjpQHrsJ+8D0GnkIcvsfA` +
+					`C9j/OPBLyL8GPA/xmZj3oj/8OZT4cwij0WStFK+VmiI4JSoKjf8EZdMgevVgRjbqqg1/mEMHxtGR` +
+					`erupgkhHKkTVqD4xhdLuf27VswLL7VZQbjVrf3mZ9KVX9IZJqkZyaG+j1mypdluF+6KqGhU11R5G` +
+					`EItXRqKKKf6xNiZOVxsiSW7vF5NqrKV0NDWMqNmfWRixsptYkgx+iV1O/Mn+nldpHSYlq4KCZtRA` +
+					`lTNRE3E4lDWp6mGjZaUHTWomOtrykdCUKxxgLjTzfKG0J2wqFfeVFjyMzT1CfC255lRRn5HQDT2J` +
+					`mcDMdQRzeNqL0NBmhEimlTDpnoeV7xGPYSmpZ3vcljQIbYf6SmjJXEwoVT6xpc+k4wkS/7fSC97t` +
+					`xvcCFbdcTO92X57apoHNSquLs6s3b3s0uHXPpes77+yZnp5eaa7m3PxbJ3YYvwFme3wbyRUAAA==`
+				noarchRpmPackageContent := rpmContentFromGzipBase64(t, noarchPackageGzipBase64)
 				// Upload the noarch RPM
-				req := NewRequestWithBody(t, "PUT", groupURL+"/upload", bytes.NewReader(noarchContent)).
-					AddBasicAuth(user.Name)
+				req := NewRequestWithBody(t, "PUT", groupURL+"/upload", bytes.NewReader(noarchRpmPackageContent)).AddBasicAuth(user.Name)
 				MakeRequest(t, req, http.StatusCreated)
 
 				// The noarch package should appear in primary.xml when any arch is requested.
@@ -849,7 +858,7 @@ gpgkey=%sapi/packages/%s/rpm/repository.key`,
 			t.Run("UploadSign", func(t *testing.T) {
 				defer tests.PrintCurrentTest(t)()
 				url := groupURL + "/upload?sign=true"
-				req := NewRequestWithBody(t, "PUT", url, bytes.NewReader(content)).
+				req := NewRequestWithBody(t, "PUT", url, bytes.NewReader(packageRpmContent)).
 					AddBasicAuth(user.Name)
 				MakeRequest(t, req, http.StatusCreated)
 
